@@ -4,6 +4,9 @@ using Amazon.SecretsManager.Model;
 using Microsoft.Extensions.Configuration;
 using Amazon.SecurityToken;
 using Amazon.SecurityToken.Model;
+using System.Text.Json.Serialization;
+using Microsoft.Data.SqlClient;
+using System.Diagnostics;
 
 namespace AwsRdsKmsConsoleApp;
 
@@ -18,29 +21,40 @@ class Program
 
         var configuration = builder.Build();
 
+        var watch = new Stopwatch();
+        watch.Start();
+
         var secret = await GetSecret(configuration);
 
-        Console.WriteLine(secret);
+        Console.WriteLine($"Secret: {secret} in {TimeSpan.FromMilliseconds(watch.ElapsedMilliseconds).TotalSeconds}");
 
-        /*
+        var dbInstance = configuration["AWS:DatabaseInstance"];
+        var dbName = configuration["AWS:DatabaseName"];
+
+        Console.WriteLine($"DB Instance: {dbInstance}, DB Name: {dbName} in {watch.ElapsedMilliseconds}");
+
         // Retrieve database credentials and get connection
-        var dbConnection = new DatabaseConnection(configuration);
-        using var connection = await dbConnection.GetConnectionAsync();
-        Console.WriteLine("Connecting to the database.");
-        await connection.OpenAsync();
-        Console.WriteLine($"Connection State: {connection.State}");
-    */
+        var dbConnection = new SqlConnection($"Server={dbInstance},1433;Database={dbName};User Id={secret.Username};Password={secret.Password}; Encrypt=false; TrustServerCertificate=true;");
+        await dbConnection.OpenAsync();
+        Console.WriteLine($"Connection State: {dbConnection.State} in {watch.ElapsedMilliseconds}");
+        var cmd = new SqlCommand("select 1", dbConnection);
+        cmd.ExecuteNonQuery();
+        await dbConnection.CloseAsync();
+        Console.WriteLine($"Completed in {watch.ElapsedMilliseconds}");
+        watch.Stop();
     }
 
-    static async Task<string> GetSecret(IConfiguration configuration)
+    static async Task<UserAndPassword> GetSecret(IConfiguration configuration)
     {
-        var secretName = configuration["SecretsManager:SecretName"];
         var regionName = configuration["AWS:Region"];
+        var secretName = configuration["AWS:SecretName"];
 
         Console.WriteLine($"Region: {regionName}, SecretName: {secretName}");
 
         var region = RegionEndpoint.GetBySystemName(regionName);
         var client = new AmazonSecretsManagerClient(region);
+
+        Console.WriteLine($"Region: {region}");
 
         GetSecretValueRequest request = new()
         {
@@ -52,18 +66,22 @@ class Program
 
         response = await client.GetSecretValueAsync(request);
 
-        string secret = response.SecretString;
+        var cred = System.Text.Json.JsonSerializer.Deserialize<UserAndPassword>(response.SecretString);
 
-        return secret;
+        return cred!;
     }
-}
 
-// Class to read the caller's identity.
-public static class Extensions
-{
-    public static async Task<string> GetCallerIdentityArn(this IAmazonSecurityTokenService stsClient)
+    public class UserAndPassword
     {
-        var response = await stsClient.GetCallerIdentityAsync(new GetCallerIdentityRequest());
-        return response.Arn;
+        [JsonPropertyName("username")]
+        public required string Username { get; set; }
+
+        [JsonPropertyName("password")]
+        public required string Password { get; set; }
+
+        public override string ToString()
+        {
+            return $"User: {Username}, Password: {Password}";
+        }
     }
 }
